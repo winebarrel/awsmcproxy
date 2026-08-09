@@ -114,6 +114,21 @@ Other spellings are not: `/opt/homebrew/bin/aws` and `sh -c 'aws ...'` both get
 through. It routes the agent to the proxy; it is not a boundary. The boundary
 is the role the credentials carry.
 
+### Agent skill
+
+`skills/awsmcproxy` tells an agent how to drive the proxy: list the profiles
+before the first call, ask when more than one name fits, and read an
+`AccessDenied` as the answer rather than something to route around. Install it
+with the [skills CLI](https://github.com/vercel-labs/skills):
+
+```
+npx skills add winebarrel/awsmcproxy          # into ./.claude/skills
+npx skills add winebarrel/awsmcproxy -g       # into ~/.claude/skills
+```
+
+Or copy `skills/awsmcproxy` into `.claude/skills/` by hand. Either way Claude
+Code picks it up on the next start.
+
 ## How it works
 
 - On startup the proxy connects to the AWS MCP Server and lists its tools. Any
