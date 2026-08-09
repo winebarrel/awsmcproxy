@@ -57,3 +57,33 @@ func TestParseEndpointError(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveSigning(t *testing.T) {
+	service, region, err := resolveSigning("https://aws-mcp.eu-central-1.api.aws/mcp")
+	require.NoError(t, err)
+
+	assert.Equal(t, "aws-mcp", service)
+	assert.Equal(t, "eu-central-1", region)
+}
+
+func TestResolveSigningRegionFromEnv(t *testing.T) {
+	t.Setenv("AWS_REGION", "us-west-2")
+
+	service, region, err := resolveSigning("https://mcp.example.com/mcp")
+	require.NoError(t, err)
+
+	assert.Equal(t, "mcp", service)
+	assert.Equal(t, "us-west-2", region)
+}
+
+func TestResolveSigningError(t *testing.T) {
+	t.Setenv("AWS_REGION", "")
+
+	_, _, err := resolveSigning("https://mcp.example.com/mcp")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not determine the SigV4 service and region")
+
+	_, _, err = resolveSigning("ftp://example.com/mcp")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported scheme")
+}

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -75,42 +73,65 @@ func newFakeAWSMCPServer(t *testing.T) *httptest.Server {
 	return httpServer
 }
 
-// setupAWSProfiles points the AWS credential chain at a throwaway credentials
-// file so each profile signs with a distinguishable access key.
+// setupAWSProfiles points the AWS credential chain at throwaway shared files so
+// each profile signs with a distinguishable access key.
 func setupAWSProfiles(t *testing.T) {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), "credentials")
-	require.NoError(t, os.WriteFile(path, []byte(`
-[my-dev]
+	useEmptySharedFiles(t)
+	writeSharedFile(t, awsSharedConfigFileEnv, "config", `
+[profile dev]
+region = us-east-1
+
+[profile prod]
+region = ap-northeast-1
+`)
+	writeSharedFile(t, awsSharedCredentialsFileEnv, "credentials", `
+[dev]
 aws_access_key_id = AKIADEV
 aws_secret_access_key = devsecret
 
-[my-prod]
+[prod]
 aws_access_key_id = AKIAPROD
 aws_secret_access_key = prodsecret
-`), 0600))
-
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", path)
-	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "config"))
+`)
 
 	// Keep the developer's own environment out of the test.
-	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_PROFILE", "dev")
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 }
 
-// newTestProxy builds a proxy in front of a fake AWS MCP Server and returns a
+func testProxy(t *testing.T, endpoint string) *Proxy {
+	t.Helper()
+
+	// Built directly rather than through NewProxy: httptest serves on
+	// 127.0.0.1, which identifies neither the signing service nor the region,
+	// and setting AWS_REGION to supply them would also override each profile's
+	// own region.
+	proxy := &Proxy{
+		endpoint: endpoint,
+		service:  "aws-mcp",
+		region:   "us-east-1",
+		version:  "test",
+		baseCtx:  context.Background(),
+		sessions: map[string]*mcp.ClientSession{},
+	}
+	t.Cleanup(proxy.closeSessions)
+
+	return proxy
+}
+
+// newTestSession builds a proxy in front of a fake AWS MCP Server and returns a
 // client session connected to it, as an MCP client would be over stdio.
-func newTestProxy(t *testing.T, config *Config) *mcp.ClientSession {
+func newTestSession(t *testing.T, proxy *Proxy) *mcp.ClientSession {
 	t.Helper()
 
 	ctx := context.Background()
-	proxy := NewProxy(config, "test")
-	proxy.baseCtx = ctx
-	t.Cleanup(proxy.closeSessions)
 
 	server, err := proxy.buildServer(ctx)
 	require.NoError(t, err)
@@ -127,21 +148,6 @@ func newTestProxy(t *testing.T, config *Config) *mcp.ClientSession {
 	t.Cleanup(func() { _ = session.Close() })
 
 	return session
-}
-
-func testConfig(t *testing.T, endpoint string) *Config {
-	t.Helper()
-
-	return &Config{
-		Endpoint: endpoint,
-		// httptest serves on 127.0.0.1, which identifies neither.
-		Service:       "aws-mcp",
-		SigningRegion: "us-east-1",
-		Profiles: []*ProfileConfig{
-			{Name: "dev", AWSProfile: "my-dev", Region: "us-east-1"},
-			{Name: "prod", AWSProfile: "my-prod", Region: "ap-northeast-1"},
-		},
-	}
 }
 
 func callWhoami(t *testing.T, session *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
@@ -176,10 +182,26 @@ func resultText(result *mcp.CallToolResult) string {
 	return text.String()
 }
 
+func TestNewProxyDefaultEndpoint(t *testing.T) {
+	proxy, err := NewProxy(&Options{}, "test")
+	require.NoError(t, err)
+
+	assert.Equal(t, DefaultEndpoint, proxy.endpoint)
+	assert.Equal(t, "aws-mcp", proxy.service)
+	assert.Equal(t, "us-east-1", proxy.region)
+}
+
+func TestNewProxyEndpointError(t *testing.T) {
+	_, err := NewProxy(&Options{Endpoint: "http://aws-mcp.us-east-1.api.aws/mcp"}, "test")
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "must be sent over HTTPS")
+}
+
 func TestProxyMirrorsTools(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-	session := newTestProxy(t, testConfig(t, upstream.URL))
+	session := newTestSession(t, testProxy(t, upstream.URL))
 
 	result, err := session.ListTools(context.Background(), nil)
 	require.NoError(t, err)
@@ -205,10 +227,7 @@ func TestProxyMirrorsTools(t *testing.T) {
 
 		// The upstream property survives alongside the injected one.
 		assert.Contains(t, properties, "echo")
-
-		profile, ok := properties[profileArg].(map[string]any)
-		require.True(t, ok)
-		assert.Equal(t, []any{"dev", "prod"}, profile["enum"])
+		assert.Contains(t, properties, profileArg)
 
 		assert.Equal(t, []any{profileArg}, schema["required"])
 	}
@@ -217,100 +236,103 @@ func TestProxyMirrorsTools(t *testing.T) {
 func TestProxyRoutesToProfile(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-	session := newTestProxy(t, testConfig(t, upstream.URL))
+	session := newTestSession(t, testProxy(t, upstream.URL))
 
 	dev := decodeWhoami(t, callWhoami(t, session, map[string]any{profileArg: "dev", "echo": "hello"}))
 	assert.Contains(t, dev.Authorization, "Credential=AKIADEV/")
 	assert.Contains(t, dev.Authorization, "/us-east-1/aws-mcp/aws4_request")
-	assert.Equal(t, "us-east-1", dev.Meta["AWS_REGION"])
 	assert.Equal(t, "hello", dev.Echo)
 
 	prod := decodeWhoami(t, callWhoami(t, session, map[string]any{profileArg: "prod"}))
 	assert.Contains(t, prod.Authorization, "Credential=AKIAPROD/")
-	// The endpoint region signs the request; the profile region only tells the
-	// server where to run the AWS operations.
+	// The endpoint region signs the request, whichever profile was used.
 	assert.Contains(t, prod.Authorization, "/us-east-1/aws-mcp/aws4_request")
-	assert.Equal(t, "ap-northeast-1", prod.Meta["AWS_REGION"])
 }
 
-func TestProxyGlobalMetadata(t *testing.T) {
+// TestProxySendsProfileRegion checks that the region the server should operate
+// in comes from the profile's own configuration.
+func TestProxySendsProfileRegion(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-
-	config := testConfig(t, upstream.URL)
-	config.Metadata = map[string]string{"COMMON": "shared"}
-	config.Profiles[0].Metadata = map[string]string{"EXTRA": "1"}
-
-	session := newTestProxy(t, config)
+	session := newTestSession(t, testProxy(t, upstream.URL))
 
 	dev := decodeWhoami(t, callWhoami(t, session, map[string]any{profileArg: "dev"}))
-	assert.Equal(t, "shared", dev.Meta["COMMON"])
-	assert.Equal(t, "1", dev.Meta["EXTRA"])
+	assert.Equal(t, "us-east-1", dev.Meta[regionMetadataKey])
 
 	prod := decodeWhoami(t, callWhoami(t, session, map[string]any{profileArg: "prod"}))
-	assert.Equal(t, "shared", prod.Meta["COMMON"])
-	assert.NotContains(t, prod.Meta, "EXTRA")
+	assert.Equal(t, "ap-northeast-1", prod.Meta[regionMetadataKey])
+}
+
+// TestProxyFallsBackToSigningRegion covers a profile with no region of its own.
+func TestProxyFallsBackToSigningRegion(t *testing.T) {
+	setupAWSProfiles(t)
+	writeSharedFile(t, awsSharedConfigFileEnv, "config", "[profile dev]\n")
+
+	upstream := newFakeAWSMCPServer(t)
+	session := newTestSession(t, testProxy(t, upstream.URL))
+
+	dev := decodeWhoami(t, callWhoami(t, session, map[string]any{profileArg: "dev"}))
+	assert.Equal(t, "us-east-1", dev.Meta[regionMetadataKey])
 }
 
 func TestProxyMissingProfileArgument(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-	session := newTestProxy(t, testConfig(t, upstream.URL))
+	session := newTestSession(t, testProxy(t, upstream.URL))
 
 	result := callWhoami(t, session, map[string]any{"echo": "hello"})
 	assert.True(t, result.IsError)
 	assert.Contains(t, resultText(result), "missing required argument 'profile'")
+	assert.Contains(t, resultText(result), "available profiles: dev, prod")
 }
 
 func TestProxyUnknownProfile(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-	session := newTestProxy(t, testConfig(t, upstream.URL))
+	session := newTestSession(t, testProxy(t, upstream.URL))
 
 	result := callWhoami(t, session, map[string]any{profileArg: "nope"})
 	assert.True(t, result.IsError)
-	assert.Contains(t, resultText(result), "unknown profile: nope")
+	assert.Contains(t, resultText(result), "failed to load the AWS config for profile 'nope'")
 	assert.Contains(t, resultText(result), "available profiles: dev, prod")
 }
 
 func TestProxyListProfiles(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-	session := newTestProxy(t, testConfig(t, upstream.URL))
+	session := newTestSession(t, testProxy(t, upstream.URL))
 
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_profiles"})
 	require.NoError(t, err)
 	require.False(t, result.IsError, resultText(result))
 
 	var decoded struct {
-		Profiles []struct {
-			Name       string `json:"name"`
-			AWSProfile string `json:"aws_profile"`
-			Region     string `json:"region"`
-			Endpoint   string `json:"endpoint"`
-		} `json:"profiles"`
+		Profiles []string `json:"profiles"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(resultText(result)), &decoded))
 
-	require.Len(t, decoded.Profiles, 2)
-	assert.Equal(t, "dev", decoded.Profiles[0].Name)
-	assert.Equal(t, "my-dev", decoded.Profiles[0].AWSProfile)
-	assert.Equal(t, "us-east-1", decoded.Profiles[0].Region)
-	assert.Equal(t, upstream.URL, decoded.Profiles[0].Endpoint)
-	assert.Equal(t, "prod", decoded.Profiles[1].Name)
+	assert.Equal(t, []string{"dev", "prod"}, decoded.Profiles)
+}
+
+// TestProxyListProfilesIsLive checks that a profile added after startup is
+// visible without restarting the proxy.
+func TestProxyListProfilesIsLive(t *testing.T) {
+	setupAWSProfiles(t)
+	upstream := newFakeAWSMCPServer(t)
+	session := newTestSession(t, testProxy(t, upstream.URL))
+
+	writeSharedFile(t, awsSharedConfigFileEnv, "config", "[profile dev]\n[profile prod]\n[profile staging]\n")
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_profiles"})
+	require.NoError(t, err)
+
+	assert.Contains(t, resultText(result), "staging")
 }
 
 func TestProxySessionIsCached(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
-
-	config := testConfig(t, upstream.URL)
-	proxy := NewProxy(config, "test")
-	proxy.baseCtx = context.Background()
-	t.Cleanup(proxy.closeSessions)
-
-	_, err := proxy.buildServer(context.Background())
-	require.NoError(t, err)
+	proxy := testProxy(t, upstream.URL)
 
 	first, err := proxy.session(context.Background(), "dev")
 	require.NoError(t, err)
@@ -330,68 +352,12 @@ func TestProxySessionIsCached(t *testing.T) {
 	assert.NotSame(t, first, third)
 }
 
-func TestProxyUnknownProfileSession(t *testing.T) {
-	setupAWSProfiles(t)
-	upstream := newFakeAWSMCPServer(t)
-
-	proxy := NewProxy(testConfig(t, upstream.URL), "test")
-	require.NoError(t, proxy.config.validate())
-
-	_, err := proxy.session(context.Background(), "nope")
-	require.Error(t, err)
-
-	assert.Contains(t, err.Error(), "unknown profile: nope")
-}
-
-func TestProxyBuildServerError(t *testing.T) {
-	t.Run("no config", func(t *testing.T) {
-		_, err := NewProxy(nil, "test").buildServer(context.Background())
-		require.Error(t, err)
-
-		assert.Contains(t, err.Error(), "no config is set")
-	})
-
-	t.Run("invalid config", func(t *testing.T) {
-		_, err := NewProxy(&Config{}, "test").buildServer(context.Background())
-		require.Error(t, err)
-
-		assert.Contains(t, err.Error(), "no profiles are configured")
-	})
-
-	t.Run("unreachable endpoint", func(t *testing.T) {
-		setupAWSProfiles(t)
-
-		config := testConfig(t, "http://127.0.0.1:1/mcp")
-		_, err := NewProxy(config, "test").buildServer(context.Background())
-		require.Error(t, err)
-
-		assert.Contains(t, err.Error(), "failed to connect to the AWS MCP Server for profile 'dev'")
-	})
-
-	t.Run("missing AWS profile", func(t *testing.T) {
-		setupAWSProfiles(t)
-		upstream := newFakeAWSMCPServer(t)
-
-		config := testConfig(t, upstream.URL)
-		config.Profiles[0].AWSProfile = "does-not-exist"
-
-		_, err := NewProxy(config, "test").buildServer(context.Background())
-		require.Error(t, err)
-
-		assert.Contains(t, err.Error(), "failed to load the AWS config for profile 'dev'")
-	})
-}
-
 func TestProxyMalformedArguments(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
+	proxy := testProxy(t, upstream.URL)
 
-	proxy := NewProxy(testConfig(t, upstream.URL), "test")
-	proxy.baseCtx = context.Background()
-	t.Cleanup(proxy.closeSessions)
-	require.NoError(t, proxy.config.validate())
-
-	_, handler, err := proxy.wrapTool(&mcp.Tool{Name: "whoami"}, proxy.config.ProfileNames())
+	_, handler, err := proxy.wrapTool(&mcp.Tool{Name: "whoami"})
 	require.NoError(t, err)
 
 	result, err := handler(context.Background(), &mcp.CallToolRequest{
@@ -406,13 +372,9 @@ func TestProxyMalformedArguments(t *testing.T) {
 func TestProxyUpstreamFailureDropsSession(t *testing.T) {
 	setupAWSProfiles(t)
 	upstream := newFakeAWSMCPServer(t)
+	proxy := testProxy(t, upstream.URL)
 
-	proxy := NewProxy(testConfig(t, upstream.URL), "test")
-	proxy.baseCtx = context.Background()
-	t.Cleanup(proxy.closeSessions)
-	require.NoError(t, proxy.config.validate())
-
-	_, handler, err := proxy.wrapTool(&mcp.Tool{Name: "whoami"}, proxy.config.ProfileNames())
+	_, handler, err := proxy.wrapTool(&mcp.Tool{Name: "whoami"})
 	require.NoError(t, err)
 
 	upstreamSession, err := proxy.session(context.Background(), "dev")
@@ -435,9 +397,42 @@ func TestProxyUpstreamFailureDropsSession(t *testing.T) {
 	assert.NotSame(t, upstreamSession, reconnected)
 }
 
-func TestProxyRunError(t *testing.T) {
-	err := NewProxy(&Config{}, "test").Run(context.Background())
+// TestProxyDiscoversToolsWithoutDefaultProfile covers the fallback that tries
+// each profile in turn when the default credential chain cannot connect.
+func TestProxyDiscoversToolsWithoutDefaultProfile(t *testing.T) {
+	setupAWSProfiles(t)
+	// No default profile and no credentials in the environment, so the default
+	// chain has nothing to sign with.
+	t.Setenv("AWS_PROFILE", "")
+
+	upstream := newFakeAWSMCPServer(t)
+	session := newTestSession(t, testProxy(t, upstream.URL))
+
+	result, err := session.ListTools(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Len(t, result.Tools, 2)
+}
+
+func TestProxyDiscoverToolsError(t *testing.T) {
+	setupAWSProfiles(t)
+
+	proxy := testProxy(t, "http://127.0.0.1:1/mcp")
+	_, err := proxy.buildServer(context.Background())
 	require.Error(t, err)
 
-	assert.Contains(t, err.Error(), "no profiles are configured")
+	assert.Contains(t, err.Error(), "failed to connect to the AWS MCP Server")
+	// Every candidate identity is reported, not just the first.
+	assert.Contains(t, err.Error(), "the default credential chain")
+	assert.Contains(t, err.Error(), "profile 'prod'")
+}
+
+func TestProxyRunError(t *testing.T) {
+	setupAWSProfiles(t)
+
+	proxy := testProxy(t, "http://127.0.0.1:1/mcp")
+	err := proxy.Run(context.Background())
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "failed to connect to the AWS MCP Server")
 }
