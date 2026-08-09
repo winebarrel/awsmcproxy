@@ -21,7 +21,10 @@ func parseArgs() *awsmcproxy.Options {
 		Version kong.VersionFlag
 	}
 
-	parser := kong.Must(&cli, kong.Vars{"version": version})
+	parser := kong.Must(&cli, kong.Vars{
+		"version":  version,
+		"endpoint": awsmcproxy.DefaultEndpoint,
+	})
 	parser.Model.HelpFlag.Help = "Show help."
 	_, err := parser.Parse(os.Args[1:])
 	parser.FatalIfErrorf(err)
@@ -35,7 +38,7 @@ func main() {
 
 	options := parseArgs()
 
-	config, err := awsmcproxy.LoadConfig(options.Config)
+	proxy, err := awsmcproxy.NewProxy(options, version)
 
 	if err != nil {
 		log.Fatal(err)
@@ -43,8 +46,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	proxy := awsmcproxy.NewProxy(config, version)
 
 	if err := proxy.Run(ctx); err != nil {
 		log.Fatal(err)

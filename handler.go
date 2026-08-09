@@ -13,14 +13,17 @@ import (
 // select the target AWS profile.
 const profileArg = "profile"
 
-// listProfilesTool returns a proxy-native tool that lists the configured AWS
-// profiles (names, AWS profile, region and endpoint only, never credentials).
-// It lets a client discover the valid values for the injected "profile"
-// argument.
-func (proxy *Proxy) listProfilesTool() (*mcp.Tool, mcp.ToolHandler) {
+// listProfilesTool returns a proxy-native tool that lists the AWS profile
+// names, and nothing else: a profile name is the whole identity of a profile
+// in the shared AWS config. It lets a client discover the valid values for the
+// injected "profile" argument.
+//
+// The list is read on every call, so a profile added to the shared config is
+// usable without restarting the proxy.
+func listProfilesTool() (*mcp.Tool, mcp.ToolHandler) {
 	tool := &mcp.Tool{
 		Name:        "list_profiles",
-		Description: "List the AWS profiles configured in awsmcproxy. Use the returned names as the 'profile' argument of the other tools.",
+		Description: "List the available AWS profiles. Use the returned names as the 'profile' argument of the other tools.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"properties":           map[string]any{},
@@ -29,22 +32,10 @@ func (proxy *Proxy) listProfilesTool() (*mcp.Tool, mcp.ToolHandler) {
 	}
 
 	handler := func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		type profileInfo struct {
-			Name       string `json:"name"`
-			AWSProfile string `json:"aws_profile,omitempty"`
-			Region     string `json:"region,omitempty"`
-			Endpoint   string `json:"endpoint,omitempty"`
-		}
+		profiles, err := Profiles()
 
-		profiles := make([]profileInfo, len(proxy.config.Profiles))
-
-		for i, profile := range proxy.config.Profiles {
-			profiles[i] = profileInfo{
-				Name:       profile.Name,
-				AWSProfile: profile.AWSProfile,
-				Region:     profile.Region,
-				Endpoint:   profile.Endpoint,
-			}
+		if err != nil {
+			return errorResult("failed to list profiles: %s", err), nil
 		}
 
 		buf, err := json.Marshal(map[string]any{"profiles": profiles})
@@ -66,8 +57,8 @@ func (proxy *Proxy) listProfilesTool() (*mcp.Tool, mcp.ToolHandler) {
 // wrapTool returns a copy of the upstream tool with the "profile" argument
 // injected, together with a handler that forwards the call over the profile's
 // connection to the AWS MCP Server.
-func (proxy *Proxy) wrapTool(tool *mcp.Tool, profileNames []string) (*mcp.Tool, mcp.ToolHandler, error) {
-	schema, err := injectProfileArg(tool.InputSchema, profileNames)
+func (proxy *Proxy) wrapTool(tool *mcp.Tool) (*mcp.Tool, mcp.ToolHandler, error) {
+	schema, err := injectProfileArg(tool.InputSchema)
 
 	if err != nil {
 		return nil, nil, err
@@ -91,7 +82,7 @@ func (proxy *Proxy) wrapTool(tool *mcp.Tool, profileNames []string) (*mcp.Tool, 
 		profile, ok := args[profileArg].(string)
 
 		if !ok || profile == "" {
-			return errorResult("missing required argument '%s'; must be one of: %s", profileArg, strings.Join(profileNames, ", ")), nil
+			return errorResult("missing required argument '%s'%s", profileArg, availableProfiles()), nil
 		}
 
 		delete(args, profileArg)
@@ -99,7 +90,7 @@ func (proxy *Proxy) wrapTool(tool *mcp.Tool, profileNames []string) (*mcp.Tool, 
 		session, err := proxy.session(ctx, profile)
 
 		if err != nil {
-			return errorResult("%s (available profiles: %s)", err, strings.Join(profileNames, ", ")), nil
+			return errorResult("%s%s", err, availableProfiles()), nil
 		}
 
 		result, err := session.CallTool(ctx, &mcp.CallToolParams{
@@ -128,9 +119,26 @@ func (proxy *Proxy) wrapTool(tool *mcp.Tool, profileNames []string) (*mcp.Tool, 
 	return &wrapped, handler, nil
 }
 
+// availableProfiles renders the profile names as a parenthesised hint for an
+// error message, or nothing if they cannot be read.
+func availableProfiles() string {
+	profiles, err := Profiles()
+
+	if err != nil || len(profiles) == 0 {
+		return ""
+	}
+
+	return " (available profiles: " + strings.Join(profiles, ", ") + ")"
+}
+
 // injectProfileArg returns a copy of the given JSON schema with a required
-// "profile" string property (enumerated over profileNames) added.
-func injectProfileArg(inputSchema any, profileNames []string) (map[string]any, error) {
+// "profile" string property added.
+//
+// The valid values are deliberately not enumerated in the schema: the profile
+// list is read from the shared AWS config on each use, so freezing it into the
+// schema at startup would go stale. Clients discover the names through the
+// list_profiles tool instead.
+func injectProfileArg(inputSchema any) (map[string]any, error) {
 	schema := map[string]any{}
 
 	// InputSchema arrives as a map[string]any from the upstream client, but
@@ -159,16 +167,9 @@ func injectProfileArg(inputSchema any, profileNames []string) (map[string]any, e
 		schema["properties"] = properties
 	}
 
-	enum := make([]any, len(profileNames))
-
-	for i, name := range profileNames {
-		enum[i] = name
-	}
-
 	properties[profileArg] = map[string]any{
 		"type":        "string",
-		"enum":        enum,
-		"description": "The AWS profile to run this tool against. One of: " + strings.Join(profileNames, ", ") + ".",
+		"description": "The AWS profile to run this tool against. Call list_profiles to see the available names.",
 	}
 
 	schema["required"] = prependRequired(schema["required"], profileArg)

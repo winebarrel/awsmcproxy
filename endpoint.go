@@ -3,6 +3,7 @@ package awsmcproxy
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -56,6 +57,28 @@ func parseEndpoint(endpoint string) (string, string, error) {
 	}
 
 	return labels[0], "", nil
+}
+
+// resolveSigning returns the SigV4 service and region used to sign requests to
+// the endpoint.
+func resolveSigning(endpoint string) (string, string, error) {
+	service, region, err := parseEndpoint(endpoint)
+
+	if err != nil {
+		return "", "", err
+	}
+
+	if region == "" {
+		// The signing region has to match the endpoint's region, so this is
+		// only a fallback for an endpoint the hostname does not identify.
+		region = os.Getenv("AWS_REGION")
+	}
+
+	if service == "" || region == "" {
+		return "", "", fmt.Errorf("could not determine the SigV4 service and region from endpoint '%s'", endpoint)
+	}
+
+	return service, region, nil
 }
 
 func isLoopback(hostname string) bool {

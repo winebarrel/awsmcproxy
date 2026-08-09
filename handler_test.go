@@ -14,7 +14,7 @@ func TestInjectProfileArg(t *testing.T) {
 			"cli_command": map[string]any{"type": "string"},
 		},
 		"required": []any{"cli_command"},
-	}, []string{"dev", "prod"})
+	})
 	require.NoError(t, err)
 
 	properties, ok := schema["properties"].(map[string]any)
@@ -26,8 +26,11 @@ func TestInjectProfileArg(t *testing.T) {
 	require.True(t, ok)
 
 	assert.Equal(t, "string", profile["type"])
-	assert.Equal(t, []any{"dev", "prod"}, profile["enum"])
-	assert.Contains(t, profile["description"], "dev, prod")
+	assert.Contains(t, profile["description"], "list_profiles")
+
+	// The valid names are not frozen into the schema; list_profiles is the
+	// discovery path.
+	assert.NotContains(t, profile, "enum")
 
 	// The injected argument leads, and the upstream requirements are kept.
 	assert.Equal(t, []any{profileArg, "cli_command"}, schema["required"])
@@ -37,7 +40,7 @@ func TestInjectProfileArgDoesNotMutateInput(t *testing.T) {
 	properties := map[string]any{}
 	input := map[string]any{"type": "object", "properties": properties}
 
-	_, err := injectProfileArg(input, []string{"dev"})
+	_, err := injectProfileArg(input)
 	require.NoError(t, err)
 
 	assert.Empty(t, properties)
@@ -45,7 +48,7 @@ func TestInjectProfileArgDoesNotMutateInput(t *testing.T) {
 
 func TestInjectProfileArgEmptySchema(t *testing.T) {
 	for _, input := range []any{nil, map[string]any{}} {
-		schema, err := injectProfileArg(input, []string{"dev"})
+		schema, err := injectProfileArg(input)
 		require.NoError(t, err)
 
 		assert.Equal(t, "object", schema["type"])
@@ -59,14 +62,14 @@ func TestInjectProfileArgEmptySchema(t *testing.T) {
 }
 
 func TestInjectProfileArgUnmarshalableSchema(t *testing.T) {
-	_, err := injectProfileArg(func() {}, []string{"dev"})
+	_, err := injectProfileArg(func() {})
 	require.Error(t, err)
 }
 
 func TestInjectProfileArgNonObjectSchema(t *testing.T) {
 	// A schema the upstream server sent as something other than a JSON object
 	// must not panic the proxy.
-	_, err := injectProfileArg([]any{"nope"}, []string{"dev"})
+	_, err := injectProfileArg([]any{"nope"})
 	require.Error(t, err)
 }
 
@@ -77,6 +80,14 @@ func TestPrependRequired(t *testing.T) {
 	assert.Equal(t, []any{"profile", "a"}, prependRequired([]any{"profile", "a"}, "profile"))
 	// A "required" of an unexpected type is replaced rather than merged.
 	assert.Equal(t, []any{"profile"}, prependRequired("a", "profile"))
+}
+
+func TestAvailableProfiles(t *testing.T) {
+	useEmptySharedFiles(t)
+	assert.Empty(t, availableProfiles())
+
+	writeSharedFile(t, awsSharedConfigFileEnv, "config", "[profile dev]\n[profile prod]\n")
+	assert.Equal(t, " (available profiles: dev, prod)", availableProfiles())
 }
 
 func TestErrorResult(t *testing.T) {
