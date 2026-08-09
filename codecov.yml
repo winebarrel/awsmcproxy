@@ -1,10 +1,15 @@
 coverage:
   status:
-    # The project floor is the real gate.
+    # 99% is the ceiling, not a rounded-down 100%. Three statements cannot be
+    # reached from a test: the errors returned by json.Marshal on a []string and
+    # on a map that json.Unmarshal just produced, and the error returned by
+    # SigV4's SignHTTP, whose only source is an HMAC write that cannot fail.
+    # They are kept because dropping the checks would be wrong, and Codecov has
+    # no line-level ignore. So the floor is the real gate, with no slack.
     project:
       default:
-        target: 90%
-        threshold: 1%
+        target: 99%
+        threshold: 0%
     # A patch can touch defensive/serve lines that are left uncovered on
     # purpose, and those few lines swing a small diff's patch coverage a lot.
     # Report patch coverage but do not fail the check on it.

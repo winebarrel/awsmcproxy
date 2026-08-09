@@ -149,3 +149,27 @@ func TestSharedFiles(t *testing.T) {
 	t.Setenv("TEST_SHARED_FILE", "/tmp/custom")
 	assert.Equal(t, []string{"/tmp/custom"}, sharedFiles("TEST_SHARED_FILE", []string{"a", "b"}))
 }
+
+// notADirectory is a path whose parent is a file, so opening it fails with
+// something other than "does not exist".
+const notADirectory = "/dev/null/nope"
+
+func TestProfilesUnopenableConfigFile(t *testing.T) {
+	useEmptySharedFiles(t)
+	t.Setenv(awsSharedConfigFileEnv, notADirectory)
+
+	_, err := Profiles()
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "failed to read")
+}
+
+func TestProfilesUnopenableCredentialsFile(t *testing.T) {
+	useEmptySharedFiles(t)
+	t.Setenv(awsSharedCredentialsFileEnv, notADirectory)
+
+	_, err := Profiles()
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "failed to read")
+}

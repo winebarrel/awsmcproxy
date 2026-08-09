@@ -124,6 +124,13 @@ func TestSigningTransportBodylessRequest(t *testing.T) {
 	_, err = transport.RoundTrip(req)
 	require.NoError(t, err)
 
+	// A replay of the bodyless request must stay bodyless.
+	replay, err := recorder.req.GetBody()
+	require.NoError(t, err)
+	replayed, err := io.ReadAll(replay)
+	require.NoError(t, err)
+	assert.Empty(t, replayed)
+
 	assert.Empty(t, recorder.body)
 	assert.Equal(t, int64(0), recorder.req.ContentLength)
 	assert.Contains(t, recorder.req.Header.Get("Authorization"), "AWS4-HMAC-SHA256")
@@ -230,4 +237,23 @@ func TestInjectMetadataNoop(t *testing.T) {
 
 	assert.Equal(t, body, injectMetadata(body, nil))
 	assert.Nil(t, injectMetadata(nil, map[string]string{"AWS_REGION": "us-east-1"}))
+}
+
+// errorReader fails on read, standing in for a request body that cannot be
+// buffered for signing.
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) { return 0, errors.New("broken body") }
+
+func TestSigningTransportBodyReadError(t *testing.T) {
+	transport := newSigningTransport(staticCredentials(), "aws-mcp", "us-east-1", nil)
+	transport.Base = &recordingTransport{}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://aws-mcp.us-east-1.api.aws/mcp", errorReader{})
+	require.NoError(t, err)
+
+	_, err = transport.RoundTrip(req)
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "failed to read the request body")
 }
