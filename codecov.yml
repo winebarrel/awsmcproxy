@@ -1,9 +1,17 @@
 coverage:
   status:
     # The project floor is the real gate.
+    #
+    # Everything reachable is covered, which Codecov measures as ~98.4% (it
+    # counts lines, where `go tool cover` counts statements and reports 99.0%).
+    # Three statements cannot be reached from a test: the errors returned by
+    # json.Marshal on a []string and on a map that json.Unmarshal just produced,
+    # and the error returned by SigV4's SignHTTP, whose only source is an HMAC
+    # write that cannot fail. They are kept because dropping the checks would be
+    # wrong, and Codecov has no line-level ignore.
     project:
       default:
-        target: 90%
+        target: 98%
         threshold: 1%
     # A patch can touch defensive/serve lines that are left uncovered on
     # purpose, and those few lines swing a small diff's patch coverage a lot.

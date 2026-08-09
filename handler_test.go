@@ -1,8 +1,10 @@
 package awsmcproxy
 
 import (
+	"context"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,4 +97,26 @@ func TestErrorResult(t *testing.T) {
 
 	assert.True(t, result.IsError)
 	assert.Equal(t, "boom: detail", resultText(result))
+}
+
+func TestListProfilesToolError(t *testing.T) {
+	useEmptySharedFiles(t)
+	t.Setenv(awsSharedConfigFileEnv, notADirectory)
+
+	_, handler := listProfilesTool()
+
+	result, err := handler(context.Background(), &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "list_profiles"},
+	})
+	require.NoError(t, err)
+
+	assert.True(t, result.IsError)
+	assert.Contains(t, resultText(result), "failed to list profiles")
+}
+
+func TestWrapToolSchemaError(t *testing.T) {
+	proxy := &Proxy{}
+
+	_, _, err := proxy.wrapTool(&mcp.Tool{Name: "broken", InputSchema: func() {}})
+	require.Error(t, err)
 }
