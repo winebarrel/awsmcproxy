@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/ssocreds"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -34,6 +35,7 @@ type Proxy struct {
 	endpoint string
 	service  string
 	region   string
+	ssoRole  string
 	version  string
 
 	// baseCtx bounds the lifetime of the upstream connections. It is the Run
@@ -63,6 +65,7 @@ func NewProxy(options *Options, version string) (*Proxy, error) {
 		endpoint: endpoint,
 		service:  service,
 		region:   region,
+		ssoRole:  options.SSORole,
 		version:  version,
 		sessions: map[string]*mcp.ClientSession{},
 	}, nil
@@ -233,6 +236,16 @@ func (proxy *Proxy) httpClient(ctx context.Context, profile string) (*http.Clien
 
 	if profile != "" {
 		options = append(options, awsconfig.WithSharedConfigProfile(profile))
+	}
+
+	if proxy.ssoRole != "" {
+		// Applied after ssocreds.New has taken sso_role_name from the profile,
+		// so this wins. Only IAM Identity Center reaches here, and only a role
+		// the SSO session is already entitled to will work -- an unassigned one
+		// fails when the credentials are first retrieved, not now.
+		options = append(options, awsconfig.WithSSOProviderOptions(func(o *ssocreds.Options) {
+			o.RoleName = proxy.ssoRole
+		}))
 	}
 
 	awsConfig, err := awsconfig.LoadDefaultConfig(ctx, options...)

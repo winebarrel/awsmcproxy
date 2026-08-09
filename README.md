@@ -45,15 +45,38 @@ go install github.com/winebarrel/awsmcproxy/cmd/awsmcproxy@latest
 Usage: awsmcproxy [flags]
 
 Flags:
-  -h, --help       Show help.
+  -h, --help               Show help.
   -e, --endpoint="https://aws-mcp.us-east-1.api.aws/mcp"
-                   AWS MCP Server endpoint ($AWSMCPROXY_ENDPOINT).
+                           AWS MCP Server endpoint ($AWSMCPROXY_ENDPOINT).
+      --sso-role=STRING    Override sso_role_name for every profile, e.g.
+                           ReadOnlyAccess ($AWSMCPROXY_SSO_ROLE).
       --version
 ```
 
 The endpoint is a full URL, not a region, so it also reaches
 `https://aws-mcp.eu-central-1.api.aws/mcp` or a Bedrock AgentCore gateway. The
 SigV4 service and region are inferred from its hostname.
+
+### Reaching AWS through a narrower role
+
+`--sso-role` replaces `sso_role_name` for every profile, keeping each profile's
+own `sso_account_id` and SSO session:
+
+```
+awsmcproxy --sso-role ReadOnlyAccess
+```
+
+This is the way to stop an agent writing to AWS. Hiding write-capable tools
+would not be a boundary; a role that lacks the permissions is one.
+
+The SSO access token is per session, not per role, so the role is swapped
+without logging in again. A role that is not assigned to you in that account
+fails when the credentials are first used, not at startup.
+
+Only IAM Identity Center can do this: its `GetRoleCredentials` takes an account
+and a role *name*, whereas `AssumeRole` needs the role's full ARN, which differs
+per account. A profile that does not use IAM Identity Center is left alone and
+keeps its own credentials.
 
 ### Claude Code
 
