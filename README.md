@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/winebarrel/awsmcproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/winebarrel/awsmcproxy/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/winebarrel/awsmcproxy/branch/main/graph/badge.svg)](https://codecov.io/gh/winebarrel/awsmcproxy)
+[![AI Generated](https://img.shields.io/badge/AI%20Generated-Claude-orange?logo=anthropic)](https://claude.ai/claude-code)
 
 A multi-profile proxy for the [AWS MCP Server](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/getting-started-aws-mcp-server.html).
 
