@@ -92,6 +92,27 @@ Register it as an MCP server:
 }
 ```
 
+Registering the proxy does not stop the agent reaching AWS another way. The
+`aws` CLI is right there, and a call through it carries no `profile` argument,
+is not signed by the proxy, and keeps none of the narrowing `--sso-role` was
+set up to do. Deny it:
+
+```json
+{
+  "permissions": {
+    "deny": ["Bash(aws *)"]
+  }
+}
+```
+
+Put that in `~/.claude/settings.json` to cover every project, or in a project's
+`.claude/settings.json`. A deny rule beats any allow rule, is matched against
+each subcommand of a pipeline separately, and is matched through a leading
+environment assignment, so `AWS_PROFILE=prod aws s3 rm ...` is blocked as well.
+Other spellings are not: `/opt/homebrew/bin/aws` and `sh -c 'aws ...'` both get
+through. It routes the agent to the proxy; it is not a boundary. The boundary
+is the role the credentials carry.
+
 ## How it works
 
 - On startup the proxy connects to the AWS MCP Server and lists its tools. Any
