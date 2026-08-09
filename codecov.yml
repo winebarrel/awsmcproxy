@@ -1,0 +1,16 @@
+coverage:
+  status:
+    # The project floor is the real gate.
+    project:
+      default:
+        target: 90%
+        threshold: 1%
+    # A patch can touch defensive/serve lines that are left uncovered on
+    # purpose, and those few lines swing a small diff's patch coverage a lot.
+    # Report patch coverage but do not fail the check on it.
+    patch:
+      default:
+        informational: true
+
+ignore:
+  - "cmd/awsmcproxy/main.go"
