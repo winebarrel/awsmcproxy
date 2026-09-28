@@ -133,7 +133,10 @@ Code picks it up on the next start.
 
 - On startup the proxy connects to the AWS MCP Server and lists its tools. Any
   identity will do, so it tries the default credential chain first and then each
-  profile in turn.
+  profile in turn. This runs in the background: the proxy answers `initialize`
+  right away, and `tools/list` and `tools/call` wait until the tools are loaded.
+  If loading fails, the proxy keeps running and returns the error from
+  `tools/list`.
 - Each tool is re-registered with a required `profile` string argument. A
   proxy-native `list_profiles` tool is also added, which reads `~/.aws/config`
   and `~/.aws/credentials` on every call -- a profile added while the proxy is

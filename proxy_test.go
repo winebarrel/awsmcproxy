@@ -275,18 +275,7 @@ func newTestSession(t *testing.T, proxy *Proxy) *mcp.ClientSession {
 	server, err := proxy.buildServer(ctx)
 	require.NoError(t, err)
 
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-
-	serverSession, err := server.Connect(ctx, serverTransport, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = serverSession.Close() })
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = session.Close() })
-
-	return session
+	return connectTestClient(t, server)
 }
 
 func callWhoami(t *testing.T, session *mcp.ClientSession, args map[string]any) *mcp.CallToolResult {
@@ -566,14 +555,84 @@ func TestProxyDiscoverToolsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "profile 'prod'")
 }
 
-func TestProxyRunError(t *testing.T) {
+// connectTestClient connects an MCP client to server over in-memory transports.
+func connectTestClient(t *testing.T, server *mcp.Server) *mcp.ClientSession {
+	t.Helper()
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = serverSession.Close() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = session.Close() })
+
+	return session
+}
+
+// TestProxyInitializesBeforeToolsLoad checks that a client can initialize
+// before the upstream tools are known, and that tools/list waits for them
+// rather than returning a partial list.
+func TestProxyInitializesBeforeToolsLoad(t *testing.T) {
+	setupAWSProfiles(t)
+	upstream := newFakeAWSMCPServer(t)
+
+	proxy := testProxy(t, upstream.URL)
+	server := proxy.newServer()
+	// Initialize completes here, while the tools are not loaded yet.
+	session := connectTestClient(t, server)
+
+	type listResult struct {
+		result *mcp.ListToolsResult
+		err    error
+	}
+
+	done := make(chan listResult, 1)
+
+	go func() {
+		result, err := session.ListTools(context.Background(), nil)
+		done <- listResult{result, err}
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("tools/list returned before the tools were loaded")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	require.NoError(t, proxy.loadTools(context.Background(), server))
+
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		assert.Len(t, got.result.Tools, 2)
+	case <-time.After(30 * time.Second):
+		t.Fatal("tools/list did not return after the tools were loaded")
+	}
+}
+
+// TestProxyReportsLoadError checks that a failure to mirror the upstream tools
+// is reported on tools/list, while list_profiles keeps working.
+func TestProxyReportsLoadError(t *testing.T) {
 	setupAWSProfiles(t)
 
 	proxy := testProxy(t, "http://127.0.0.1:1/mcp")
-	err := proxy.Run(context.Background())
-	require.Error(t, err)
+	server := proxy.newServer()
+	session := connectTestClient(t, server)
 
+	require.Error(t, proxy.loadTools(context.Background(), server))
+
+	_, err := session.ListTools(context.Background(), nil)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to connect to the AWS MCP Server")
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_profiles"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError, resultText(result))
 }
 
 func TestProxyDiscoverToolsProfilesError(t *testing.T) {
