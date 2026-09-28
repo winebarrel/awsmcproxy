@@ -45,6 +45,12 @@ type Proxy struct {
 
 	mu       sync.Mutex
 	sessions map[string]*mcp.ClientSession
+
+	// loaded is closed once the upstream tools are mirrored (or failed to be),
+	// and loadErr holds the failure. Tool requests wait on loaded, so the proxy
+	// can answer initialize before the slow upstream connection is up.
+	loaded  chan struct{}
+	loadErr error
 }
 
 // NewProxy creates a Proxy for the endpoint in options.
@@ -71,46 +77,108 @@ func NewProxy(options *Options, version string) (*Proxy, error) {
 	}, nil
 }
 
-// Run builds the proxy server and serves it over stdio until the client
-// disconnects or ctx is cancelled.
+// Run serves the proxy over stdio until the client disconnects or ctx is
+// cancelled.
+//
+// It starts serving before the upstream tools are known: connecting to the AWS
+// MCP Server takes seconds, and a client that times out waiting for the
+// initialize response may send initialize again, which the SDK rejects as a
+// duplicate. The tools are mirrored in the background instead, and tool
+// requests wait for them. If mirroring fails, the proxy keeps running and
+// reports the failure on those requests rather than exiting.
 func (proxy *Proxy) Run(ctx context.Context) error {
 	// Bind the upstream connections to the proxy's lifetime, and close them when
 	// the proxy stops (client disconnect or ctx cancellation).
 	proxy.baseCtx = ctx
 	defer proxy.closeSessions()
 
-	server, err := proxy.buildServer(ctx)
+	server := proxy.newServer()
 
-	if err != nil {
-		return err
-	}
+	go func() {
+		if err := proxy.loadTools(ctx, server); err != nil {
+			log.Printf("[%s] %s", appName, err)
+		}
+	}()
 
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
-// buildServer connects to the AWS MCP Server, mirrors its tools (each with an
-// injected profile argument, plus a proxy-native list_profiles tool) and
-// returns a server ready to serve. It does not start serving.
+// buildServer builds the proxy server and mirrors the upstream tools into it,
+// returning once they are loaded. It does not start serving.
 func (proxy *Proxy) buildServer(ctx context.Context) (*mcp.Server, error) {
+	server := proxy.newServer()
+
+	if err := proxy.loadTools(ctx, server); err != nil {
+		return nil, err
+	}
+
+	return server, nil
+}
+
+// newServer returns a server holding only the proxy-native list_profiles tool.
+// Tool requests it receives wait until loadTools has run.
+func (proxy *Proxy) newServer() *mcp.Server {
+	proxy.loaded = make(chan struct{})
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    appName,
 		Version: proxy.version,
 	}, nil)
 
+	server.AddReceivingMiddleware(proxy.waitForTools)
+	// Add a proxy-native tool so clients can discover the available profiles.
+	server.AddTool(listProfilesTool())
+
+	return server
+}
+
+// waitForTools holds tools/list and tools/call until the upstream tools are
+// mirrored, so a client never sees a partial tool list.
+func (proxy *Proxy) waitForTools(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if method != "tools/list" && method != "tools/call" {
+			return next(ctx, method, req)
+		}
+
+		select {
+		case <-proxy.loaded:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		// list_profiles still works without the upstream tools, and helps to
+		// diagnose the failure.
+		if proxy.loadErr != nil && method == "tools/list" {
+			return nil, proxy.loadErr
+		}
+
+		return next(ctx, method, req)
+	}
+}
+
+// loadTools connects to the AWS MCP Server and mirrors its tools into server,
+// each with an injected profile argument. It records the outcome for
+// waitForTools.
+func (proxy *Proxy) loadTools(ctx context.Context, server *mcp.Server) error {
+	defer close(proxy.loaded)
+
+	proxy.loadErr = proxy.addTools(ctx, server)
+
+	return proxy.loadErr
+}
+
+func (proxy *Proxy) addTools(ctx context.Context, server *mcp.Server) error {
 	tools, err := proxy.discoverTools(ctx)
 
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	// Add a proxy-native tool so clients can discover the available profiles.
-	server.AddTool(listProfilesTool())
 
 	for _, tool := range tools {
 		wrapped, handler, err := proxy.wrapTool(tool)
 
 		if err != nil {
-			return nil, fmt.Errorf("failed to wrap tool '%s': %w", tool.Name, err)
+			return fmt.Errorf("failed to wrap tool '%s': %w", tool.Name, err)
 		}
 
 		server.AddTool(wrapped, handler)
@@ -118,7 +186,7 @@ func (proxy *Proxy) buildServer(ctx context.Context) (*mcp.Server, error) {
 
 	log.Printf("[%s] serving %d AWS MCP tools from %s", appName, len(tools), proxy.endpoint)
 
-	return server, nil
+	return nil
 }
 
 // discoverTools lists the tools to mirror. Every profile reaches the same
